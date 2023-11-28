@@ -1,0 +1,156 @@
+
+name: "Build & Test"
+
+on:
+  # allow direct trigger
+  workflow_dispatch:
+  push:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GCC_VERSION: 11
+  COMMON_CMAKE_FLAGS: >
+    -DBUILD_TESTS=ON
+
+jobs:
+
+  build-native:
+    runs-on: ubuntu-latest
+
+    name: build-native
+    steps:
+      - uses: actions/checkout@v4.1.1
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y -qq
+          sudo apt-get install -y -qq build-essential curl ninja-build debootstrap
+
+      - name: Install gcc
+        run: |
+          sudo apt-get install -y -qq gcc-${GCC_VERSION}
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3.0.0
+        with:
+          platforms: ${{ matrix.binfmt || matrix.arch }}
+
+      - name: Check sysroot cache
+        id: check-sysroot-cache
+        uses: actions/cache@v3
+        with:
+          path: sysroot
+          key: sysroot-native-${{ hashFiles('./.github/workflows/build_and_test.yml') }}
+
+      - name: Create sysroot
+        run: |
+          sudo debootstrap --arch=amd64 --verbose --include=build-essential,autoconf,automake,flex,bison,libc-ares-dev,libcurl4-openssl-dev,libssl-dev,libboost-all-dev,libicu-dev,libdouble-conversion-dev,libgoogle-glog-dev,libbz2-dev,libgflags-dev,libgmock-dev,libevent-dev,liblz4-dev,libzstd-dev,libre2-dev,libsnappy-dev,libsodium-dev,liblzo2-dev,libelf-dev,libdwarf-dev,libfl-dev,libfmt-dev --resolve-deps --variant=minbase --components=main,universe focal sysroot
+        if: steps.check-sysroot-cache.outputs.cache-hit != 'true'
+
+      - name: Build native
+        shell: bash -ex -o pipefail {0}
+        run: |
+          EXTRA_CMAKE_FLAGS=""
+
+          cmake -S . -B _build-native -GNinja \
+            -DCMAKE_TOOLCHAIN_FILE=$(pwd)/.github/toolchain-native-gcc.cmake \
+            -DCMAKE_SYSROOT=$(pwd)/sysroot \
+            ${COMMON_CMAKE_FLAGS} \
+            ${EXTRA_CMAKE_FLAGS}
+          cmake --build _build-native
+          cmake --install _build-native
+
+      - name: Test native
+        shell: bash -ex -o pipefail {0}
+        run: |
+          cd _build-native
+          ctest -j$(nproc) --output-on-failure
+
+      - name: Upload build-native artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: build-native
+          path: |
+            _build-native
+        if: always()
+
+  build-cross:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [aarch64, riscv64]
+        include:
+          - arch: aarch64
+            debarch: arm64
+
+    name: build-${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4.1.1
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y -qq
+          sudo apt-get install -y -qq build-essential curl ninja-build debootstrap
+
+      - name: Install gcc
+        run: |
+          sudo apt-get install -y -qq gcc-${GCC_VERSION}${{ matrix.gnupkg || format('-{0}-linux-gnu', matrix.arch) }}
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3.0.0
+        with:
+          platforms: ${{ matrix.binfmt || matrix.arch }}
+
+      - name: Check sysroot cache
+        id: check-sysroot-cache
+        uses: actions/cache@v3
+        with:
+          path: sysroot
+          key: sysroot-${{ matrix.arch }}-${{ hashFiles('./.github/workflows/build_and_test.yml') }}
+
+      - name: Create sysroot
+        run: |
+          sudo debootstrap --arch=${{ matrix.debarch || matrix.arch }} --verbose --include=build-essential,autoconf,automake,flex,bison,libc-ares-dev,libcurl4-openssl-dev,libssl-dev,libboost-all-dev,libicu-dev,libdouble-conversion-dev,libgoogle-glog-dev,libbz2-dev,libgflags-dev,libgmock-dev,libevent-dev,liblz4-dev,libzstd-dev,libre2-dev,libsnappy-dev,libsodium-dev,liblzo2-dev,libelf-dev,libdwarf-dev,libfl-dev,libfmt-dev --resolve-deps --variant=minbase --components=main,universe focal sysroot
+        if: steps.check-sysroot-cache.outputs.cache-hit != 'true'
+
+      - name: Build ${{ matrix.arch }}
+        shell: bash -ex -o pipefail {0}
+        run: |
+          EXTRA_CMAKE_FLAGS=""
+          if [[ ${{ matrix.arch }} = "aarch64" ]]; then
+          elif [[ ${{ matrix.arch }} = "riscv64" ]]; then
+          fi
+
+          cmake -S . -B _build-${{ matrix.arch }} -GNinja \
+            -DCMAKE_TOOLCHAIN_FILE=$(pwd)/.github/toolchain-${{ matrix.arch }}-gcc.cmake \
+            -DCMAKE_SYSROOT=$(pwd)/sysroot \
+            ${COMMON_CMAKE_FLAGS} \
+            ${EXTRA_CMAKE_FLAGS}
+          cmake --build _build-${{ matrix.arch }}
+          cmake --install _build-${{ matrix.arch }}
+
+      # - name: Test ${{ matrix.arch }}
+      #   shell: bash -ex -o pipefail {0}
+      #   run: |
+      #     cd _build-${{ matrix.arch }}
+      #     ctest -j$(nproc) --output-on-failure
+
+      - name: Upload build-${{ matrix.arch }} artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: build-${{ matrix.arch }}
+          path: |
+            _build-${{ matrix.arch }}
+        if: always()
